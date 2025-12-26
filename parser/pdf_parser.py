@@ -28,9 +28,12 @@ class PDFParser:
         self.pdf_path = pdf_path
         self.transactions: List[Transaction] = []
     
-    def parse(self) -> List[Transaction]:
+    def parse(self, debug: bool = False) -> List[Transaction]:
         """
         Parse the PDF and extract all transactions.
+        
+        Args:
+            debug: If True, print debug information about extracted content
         
         Returns:
             List of Transaction objects
@@ -38,20 +41,55 @@ class PDFParser:
         transactions = []
         
         with pdfplumber.open(self.pdf_path) as pdf:
-            for page in pdf.pages:
+            for page_num, page in enumerate(pdf.pages, 1):
+                if debug:
+                    print(f"\n--- Page {page_num} ---")
+                
                 # Try table extraction first (more reliable for structured data)
                 tables = page.extract_tables()
-                if tables:
-                    for table in tables:
-                        page_transactions = self._extract_transactions_from_table(table)
-                        transactions.extend(page_transactions)
+                if debug:
+                    print(f"Found {len(tables) if tables else 0} tables")
                 
-                # Fallback to text extraction if no tables found
-                if not tables:
-                    text = page.extract_text()
-                    if text:
-                        page_transactions = self._extract_transactions_from_text(text)
-                        transactions.extend(page_transactions)
+                table_transactions = []
+                if tables:
+                    for table_num, table in enumerate(tables):
+                        if debug:
+                            print(f"\nTable {table_num + 1} (first 3 rows):")
+                            for i, row in enumerate(table[:3]):
+                                print(f"  Row {i}: {row}")
+                        
+                        page_transactions = self._extract_transactions_from_table(table)
+                        table_transactions.extend(page_transactions)
+                        if debug:
+                            print(f"  Extracted {len(page_transactions)} transactions from this table")
+                
+                # Always try text extraction as well (RBC statements may have mixed formats)
+                text = page.extract_text()
+                if text:
+                    if debug:
+                        print(f"\nText extraction (first 500 chars):")
+                        print(text[:500])
+                        print("...")
+                    
+                    text_transactions = self._extract_transactions_from_text(text)
+                    if debug:
+                        print(f"Extracted {len(text_transactions)} transactions from text")
+                    
+                    # Combine transactions, avoiding duplicates
+                    # (prefer table extraction if both found the same transaction)
+                    if table_transactions:
+                        # Use table transactions, add text transactions that aren't duplicates
+                        transactions.extend(table_transactions)
+                        # Simple deduplication: check if merchant+amount+date match
+                        existing = {(t.merchant_description, t.amount, t.transaction_date.date()) 
+                                   for t in table_transactions}
+                        for t in text_transactions:
+                            key = (t.merchant_description, t.amount, t.transaction_date.date())
+                            if key not in existing:
+                                transactions.append(t)
+                                existing.add(key)
+                    else:
+                        transactions.extend(text_transactions)
         
         self.transactions = transactions
         return transactions
@@ -120,33 +158,106 @@ class PDFParser:
         """
         Extract transactions from page text.
         
-        RBC statements typically have transactions in a format like:
-        MM/DD MERCHANT NAME                    $XX.XX
+        RBC statements have transactions in format:
+        MON DD MON DD MERCHANT NAME                    $XX.XX
+        e.g., "NOV 25 NOV 27 MCDONALD'S #40392 BRAMPTON ON $3.38"
         """
         transactions = []
         lines = text.split('\n')
         
-        # Pattern to match date, merchant, and amount
-        date_pattern = r'(\d{1,2}/\d{1,2}(?:/\d{2,4})?)'
-        amount_pattern = r'[\$]?([\d,]+\.\d{2})'
+        # Month abbreviations
+        months = {
+            'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
+            'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12
+        }
+        
+        # Pattern for RBC format: MON DD MON DD (two dates - posting and transaction)
+        # We'll use the second date (transaction date)
+        rbc_date_pattern = r'([A-Z]{3})\s+(\d{1,2})\s+([A-Z]{3})\s+(\d{1,2})'
+        # Also handle single date format: MON DD
+        single_date_pattern = r'([A-Z]{3})\s+(\d{1,2})'
+        # Amount pattern: $XX.XX at end of line
+        amount_pattern = r'\$\s*([\d,]+\.\d{2})\s*$'
         
         i = 0
         while i < len(lines):
             line = lines[i].strip()
             
-            # Look for date pattern
-            date_match = re.search(date_pattern, line)
+            # Skip empty lines
+            if not line:
+                i += 1
+                continue
+            
+            # Skip header lines
+            if any(header in line.upper() for header in ['TRANSACTION', 'POSTING', 'ACTIVITY', 'DESCRIPTION', 'AMOUNT', 'DATE']):
+                i += 1
+                continue
+            
+            # Try RBC double date format first (MON DD MON DD)
+            date_match = re.search(rbc_date_pattern, line)
+            transaction_date = None
+            date_end = 0
+            
             if date_match:
-                date_str = date_match.group(1)
+                # Use the second date (transaction date, not posting date)
+                month_str = date_match.group(3)
+                day = int(date_match.group(4))
+                date_end = date_match.end()
                 
-                # Try to extract amount from the same line or next lines
+                if month_str in months:
+                    month = months[month_str]
+                    year = datetime.now().year
+                    # If month is > current month, it's probably last year
+                    if month > datetime.now().month:
+                        year = datetime.now().year - 1
+                    transaction_date = datetime(year, month, day)
+            else:
+                # Try single date format
+                single_match = re.search(single_date_pattern, line)
+                if single_match:
+                    month_str = single_match.group(1)
+                    day = int(single_match.group(2))
+                    date_end = single_match.end()
+                    
+                    if month_str in months:
+                        month = months[month_str]
+                        year = datetime.now().year
+                        if month > datetime.now().month:
+                            year = datetime.now().year - 1
+                        transaction_date = datetime(year, month, day)
+            
+            if transaction_date:
+                # Look for amount at end of line
                 amount_match = re.search(amount_pattern, line)
                 
                 if amount_match:
-                    # Extract merchant name (between date and amount)
-                    date_end = date_match.end()
+                    # Extract text between date and amount
                     amount_start = amount_match.start()
-                    merchant = line[date_end:amount_start].strip()
+                    text_between = line[date_end:amount_start].strip()
+                    
+                    # Skip long numeric IDs (transaction IDs, account numbers, etc.)
+                    # These are typically 15+ digits
+                    parts = text_between.split()
+                    merchant_parts = []
+                    
+                    for part in parts:
+                        # Skip parts that are just long numbers (likely transaction IDs)
+                        if part.isdigit() and len(part) >= 15:
+                            continue
+                        # Skip parts that are just numbers with dashes (account numbers)
+                        if re.match(r'^\d+-\d+$', part):
+                            continue
+                        merchant_parts.append(part)
+                    
+                    merchant = ' '.join(merchant_parts).strip()
+                    
+                    # Clean up merchant name
+                    merchant = re.sub(r'\s+', ' ', merchant)
+                    
+                    # Skip if merchant is too short or empty
+                    if len(merchant) < 2:
+                        i += 1
+                        continue
                     
                     # Parse amount
                     amount_str = amount_match.group(1).replace(',', '')
@@ -158,10 +269,8 @@ class PDFParser:
                     
                     # Only process purchases (positive amounts)
                     if amount > 0:
-                        transaction_date = self._parse_date(date_str)
-                        if transaction_date:
-                            transaction = Transaction(merchant, transaction_date, amount)
-                            transactions.append(transaction)
+                        transaction = Transaction(merchant, transaction_date, amount)
+                        transactions.append(transaction)
             
             i += 1
         

@@ -66,18 +66,20 @@ def classify_transaction(merchant_description: str, transaction_date: datetime, 
         return 'other'
 
 
-def aggregate_by_category(transactions: List) -> Dict[str, float]:
+def aggregate_by_category(transactions: List, debug: bool = False) -> Dict[str, float]:
     """
     Classify and aggregate transactions by category.
     
     Args:
         transactions: List of Transaction objects
+        debug: If True, print skipped transactions
         
     Returns:
         Dictionary mapping category names to total amounts
     """
     category_totals = {cat: 0.0 for cat in CATEGORIES}
     skipped_count = 0
+    skipped_transactions = []
     
     for transaction in transactions:
         category = classify_transaction(
@@ -88,6 +90,7 @@ def aggregate_by_category(transactions: List) -> Dict[str, float]:
         
         if category is None:
             skipped_count += 1
+            skipped_transactions.append(transaction)
             continue
         
         if category not in category_totals:
@@ -97,6 +100,11 @@ def aggregate_by_category(transactions: List) -> Dict[str, float]:
     
     # Remove categories with zero totals
     category_totals = {k: v for k, v in category_totals.items() if v > 0}
+    
+    if debug and skipped_transactions:
+        print("\nSkipped transactions:")
+        for t in skipped_transactions:
+            print(f"  {t.merchant_description[:50]:50s} ${t.amount:8.2f} ({t.transaction_date.date()})")
     
     return category_totals, skipped_count
 

@@ -45,6 +45,11 @@ def main():
         default='config.yaml',
         help='Path to config file (default: config.yaml)'
     )
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Enable debug mode to see PDF parsing details'
+    )
     
     args = parser.parse_args()
     
@@ -74,7 +79,7 @@ def main():
     print(f"Parsing PDF: {args.pdf}")
     pdf_parser = PDFParser(str(pdf_path))
     try:
-        transactions = pdf_parser.parse()
+        transactions = pdf_parser.parse(debug=args.debug)
         print(f"Found {len(transactions)} transactions")
     except Exception as e:
         print(f"Error parsing PDF: {e}")
@@ -86,7 +91,7 @@ def main():
     
     # Classify and aggregate
     print("Classifying transactions...")
-    category_totals, skipped_count = aggregate_by_category(transactions)
+    category_totals, skipped_count = aggregate_by_category(transactions, debug=args.debug)
     
     if skipped_count > 0:
         print(f"Skipped {skipped_count} transactions (payments, fees, etc.)")
