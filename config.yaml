@@ -1,0 +1,8 @@
+# Google Sheets Configuration
+# Service account credentials should be stored in credentials.json
+# Share your Google Sheet with the service account email
+
+google:
+  credentials_file: credentials.json
+  # Sheet ID will be provided via CLI argument
+
